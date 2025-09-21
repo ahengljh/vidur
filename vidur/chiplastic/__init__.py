@@ -10,7 +10,9 @@ from vidur.chiplastic.config import (
     ChiplasticScalingThresholds,
     ChiplasticTuningConfig,
 )
+from vidur.chiplastic.memory import ChipletMemoryManager, RemoteAccessProfile
 from vidur.chiplastic.runtime import ChiplasticRuntime, ScalingState
+from vidur.chiplastic.interconnect import InterconnectModel
 
 __all__ = [
     "ChiplasticHardwareConfig",
@@ -18,4 +20,7 @@ __all__ = [
     "ChiplasticTuningConfig",
     "ChiplasticRuntime",
     "ScalingState",
+    "ChipletMemoryManager",
+    "RemoteAccessProfile",
+    "InterconnectModel",
 ]

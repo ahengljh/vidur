@@ -23,11 +23,14 @@ class ChiplasticHardwareConfig:
     compute_tflops_per_die: float = 350.0
     memory_bandwidth_tbps_per_die: float = 0.65
     kv_blocks_per_die: int = 2048
+    kv_block_dtype_bytes: int = 2
     compute_idle_power_w: float = 35.0
     compute_active_power_w: float = 170.0
     memory_idle_power_w: float = 9.0
     memory_active_power_w: float = 45.0
     remote_penalty_factor: float = 0.35
+    interconnect_bandwidth_tbps: float = 1.6
+    interconnect_latency_ns: float = 180.0
 
     def __post_init__(self) -> None:
         if self.base_compute_dies <= 0 or self.base_memory_dies <= 0:

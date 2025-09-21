@@ -142,6 +142,11 @@ available under the nested `chiplastic` configuration. Refer to
 [`docs/chiplastic.md`](docs/chiplastic.md) for guidance on reproducing the
 experiments presented in the paper.
 
+The runtime now models explicit chiplet memory/interconnect behaviour,
+exposing remote KV fetch latency, bandwidth utilisation, and per-stage energy
+in the exported traces so you can generate the latency/energy breakdown plots
+described in the Chiplastic paper.
+
 ## Simulator Output
 
 * The metrics will be logged to wandb directly and a copy will be stored in the `simulator_output/<TIMESTAMP>` directory. __A description of all the logged metrics can be found [here](docs/metrics.md).__

@@ -7,6 +7,8 @@ from enum import Enum, auto
 from typing import Dict, Optional
 
 from vidur.chiplastic.config import ChiplasticTuningConfig
+from vidur.chiplastic.interconnect import InterconnectModel
+from vidur.chiplastic.memory import ChipletMemoryManager, RemoteAccessProfile
 from vidur.entities import Batch, BatchStage, ExecutionTime
 from vidur.logger import init_logger
 
@@ -46,10 +48,14 @@ class StageObservation:
     memory_pressure: float
     allocated_blocks: int
     capacity_blocks: int
+    remote_profile: RemoteAccessProfile
+    remote_latency_ms: float
+    remote_bytes: float
+    local_bytes: float
 
     @property
     def latency_ms(self) -> float:
-        return self.execution_time.total_time * 1e3
+        return self.execution_time.total_time * 1e3 + self.remote_latency_ms
 
 
 def _clamp(value: float, lower: float, upper: float) -> float:
@@ -96,6 +102,69 @@ def _scale_execution_time(
     )
 
 
+def _clone_execution_time(execution_time: ExecutionTime, **overrides) -> ExecutionTime:
+    return ExecutionTime(
+        num_layers_per_pipeline_stage=overrides.get(
+            "num_layers_per_pipeline_stage", execution_time.num_layers
+        ),
+        attention_rope_execution_time=overrides.get(
+            "attention_rope_execution_time", execution_time.attention_rope_execution_time
+        ),
+        attention_kv_cache_save_execution_time=overrides.get(
+            "attention_kv_cache_save_execution_time",
+            execution_time.attention_kv_cache_save_execution_time,
+        ),
+        attention_decode_execution_time=overrides.get(
+            "attention_decode_execution_time",
+            execution_time.attention_decode_execution_time,
+        ),
+        attention_prefill_execution_time=overrides.get(
+            "attention_prefill_execution_time",
+            execution_time.attention_prefill_execution_time,
+        ),
+        attention_layer_pre_proj_execution_time=overrides.get(
+            "attention_layer_pre_proj_execution_time",
+            execution_time.attention_pre_proj_time,
+        ),
+        attention_layer_post_proj_execution_time=overrides.get(
+            "attention_layer_post_proj_execution_time",
+            execution_time.attention_post_proj_time,
+        ),
+        mlp_layer_up_proj_execution_time=overrides.get(
+            "mlp_layer_up_proj_execution_time",
+            execution_time.mlp_layer_up_proj_execution_time,
+        ),
+        mlp_layer_down_proj_execution_time=overrides.get(
+            "mlp_layer_down_proj_execution_time",
+            execution_time.mlp_layer_down_proj_execution_time,
+        ),
+        mlp_layer_act_execution_time=overrides.get(
+            "mlp_layer_act_execution_time",
+            execution_time.mlp_layer_act_execution_time,
+        ),
+        attn_norm_time=overrides.get("attn_norm_time", execution_time.attn_norm_time),
+        mlp_norm_time=overrides.get("mlp_norm_time", execution_time.mlp_norm_time),
+        add_time=overrides.get("add_time", execution_time.add_time),
+        tensor_parallel_communication_time=overrides.get(
+            "tensor_parallel_communication_time",
+            execution_time.mlp_all_reduce_time,
+        ),
+        pipeline_parallel_communication_time=overrides.get(
+            "pipeline_parallel_communication_time",
+            execution_time.pipeline_parallel_communication_time,
+        ),
+        schedule_time=overrides.get("schedule_time", execution_time.schedule_time),
+        sampler_e2e_time=overrides.get("sampler_e2e_time", execution_time.sampler_e2e_time),
+        prepare_inputs_e2e_time=overrides.get(
+            "prepare_inputs_e2e_time", execution_time.prepare_inputs_e2e_time
+        ),
+        process_model_outputs_time=overrides.get(
+            "process_model_outputs_time", execution_time.process_model_outputs_time
+        ),
+        ray_comm_time=overrides.get("ray_comm_time", execution_time.ray_comm_time),
+    )
+
+
 class ChiplasticController:
     def __init__(self, tuning: ChiplasticTuningConfig) -> None:
         self._tuning = tuning
@@ -127,12 +196,21 @@ class ChiplasticController:
                 target_compute = self.active_compute + 1
                 reason = "prefill_latency"
         elif observation.stage_type == StageType.DECODE:
+            remote_latency = observation.remote_latency_ms
+            remote_fraction = observation.remote_profile.remote_fraction
             if (
                 observation.memory_pressure > thresholds.memory_utilization_scale_up
                 and self.active_memory < hardware.max_memory_dies
             ):
                 target_memory = self.active_memory + 1
                 reason = "memory_pressure"
+            elif (
+                remote_latency > thresholds.decode_latency_target_ms
+                and remote_fraction > 0.2
+                and self.active_memory < hardware.max_memory_dies
+            ):
+                target_memory = self.active_memory + 1
+                reason = "remote_latency"
             elif (
                 observation.latency_ms > thresholds.decode_latency_target_ms
                 and self.active_compute < hardware.max_compute_dies
@@ -193,13 +271,25 @@ class ChiplasticController:
 
 
 class ChiplasticRuntime:
-    def __init__(self, replica_id: int, tuning: ChiplasticTuningConfig, num_initial_blocks: int) -> None:
+    def __init__(
+        self,
+        replica_id: int,
+        tuning: ChiplasticTuningConfig,
+        num_initial_blocks: int,
+        memory_manager: ChipletMemoryManager,
+    ) -> None:
         self._replica_id = replica_id
         self._tuning = tuning
         self._controller = ChiplasticController(tuning)
         self._history: list[Dict[str, float]] = []
         self._base_blocks = num_initial_blocks
+        self._memory_manager = memory_manager
+        self._interconnect = InterconnectModel(
+            bandwidth_tbps=tuning.hardware.interconnect_bandwidth_tbps,
+            base_latency_ns=tuning.hardware.interconnect_latency_ns,
+        )
         self._energy_joules = 0.0
+        self._dtype_bytes = tuning.hardware.kv_block_dtype_bytes
 
     @property
     def active_compute(self) -> int:
@@ -223,8 +313,24 @@ class ChiplasticRuntime:
     ) -> ExecutionTime:
         stage_type = self._infer_stage_type(batch)
         allocated_blocks = replica_scheduler.num_allocated_blocks
-        capacity_blocks = replica_scheduler._config.num_blocks
-        pressure = allocated_blocks / max(capacity_blocks, 1)
+        capacity_blocks = max(self._memory_manager.total_blocks, 1)
+        pressure = allocated_blocks / capacity_blocks
+
+        remote_profile = self._memory_manager.remote_profile(
+            batch.request_ids,
+            active_compute=self.active_compute,
+            active_memory=self.active_memory,
+        )
+        stage_bytes = self._estimate_stage_bytes(batch, stage_type, replica_scheduler)
+        remote_bytes_raw = stage_bytes * remote_profile.remote_fraction
+        effective_remote_bytes = remote_bytes_raw * (1.0 - self._tuning.prefetch_effectiveness)
+        local_bytes = max(stage_bytes - remote_bytes_raw, 0.0)
+        remote_stats = self._interconnect.estimate(
+            bytes_requested=effective_remote_bytes,
+            hops=1,
+            parallel_transfers=max(1, self.active_compute),
+        )
+        remote_latency_ms = remote_stats.latency_s * 1e3
 
         observation = StageObservation(
             current_time=now,
@@ -237,6 +343,10 @@ class ChiplasticRuntime:
             memory_pressure=pressure,
             allocated_blocks=allocated_blocks,
             capacity_blocks=capacity_blocks,
+            remote_profile=remote_profile,
+            remote_latency_ms=remote_latency_ms,
+            remote_bytes=effective_remote_bytes,
+            local_bytes=local_bytes,
         )
 
         prev_compute = self.active_compute
@@ -284,21 +394,16 @@ class ChiplasticRuntime:
         self._controller.state = self._controller._infer_state()
 
     def _grow_memory(self, replica_scheduler, count: int) -> bool:
-        blocks_per_die = self._tuning.hardware.kv_blocks_per_die
-        replica_scheduler._config.num_blocks += blocks_per_die * count
-        return True
+        added = self._memory_manager.add_helper_dies(count)
+        if added:
+            replica_scheduler._config.num_blocks = self._memory_manager.total_blocks
+        return added == count
 
     def _shrink_memory(self, replica_scheduler, count: int) -> bool:
-        blocks_per_die = self._tuning.hardware.kv_blocks_per_die
-        removable = blocks_per_die * count
-        if replica_scheduler._config.num_blocks - removable < replica_scheduler._num_allocated_blocks:
-            logger.warning(
-                "Replica %s: unable to scale down memory due to insufficient headroom",
-                self._replica_id,
-            )
-            return False
-        replica_scheduler._config.num_blocks -= removable
-        return True
+        removed = self._memory_manager.remove_helper_dies(count)
+        if removed:
+            replica_scheduler._config.num_blocks = self._memory_manager.total_blocks
+        return removed == count
 
     def _adjust_execution_time(
         self,
@@ -314,9 +419,7 @@ class ChiplasticRuntime:
         active_compute_capacity = (
             self.active_compute * hardware.compute_tflops_per_die
         )
-        remote_ratio = 0.0
-        if self.active_memory:
-            remote_ratio = max(0.0, self.active_memory - self.active_compute) / self.active_memory
+        remote_ratio = observation.remote_profile.remote_fraction
 
         dispatch_modifier = 1.0 - remote_ratio * (1.0 - self._tuning.dispatch_locality_bias)
         effective_compute_capacity = max(active_compute_capacity * dispatch_modifier, 1e-3)
@@ -329,11 +432,8 @@ class ChiplasticRuntime:
         )
         prefetch_modifier = 1.0 - remote_ratio * (1.0 - self._tuning.prefetch_effectiveness)
         effective_bandwidth = active_bandwidth * prefetch_modifier
-        penalty = 1.0 + remote_ratio * hardware.remote_penalty_factor * (
-            1.0 - self._tuning.prefetch_effectiveness
-        )
         memory_scale = base_bandwidth / max(effective_bandwidth, 1e-3)
-        memory_scale = _clamp(memory_scale * penalty, 0.35, 3.0)
+        memory_scale = _clamp(memory_scale, 0.35, 3.0)
 
         if stage_type == StageType.PREFILL:
             adjusted = _scale_execution_time(
@@ -350,9 +450,43 @@ class ChiplasticRuntime:
         else:
             adjusted = observation.execution_time
 
+        remote_latency_s = max(observation.remote_latency_ms, 0.0) / 1e3
+        if remote_latency_s > 0:
+            penalty_us = remote_latency_s * 1e6
+            if stage_type == StageType.DECODE:
+                adjusted = _clone_execution_time(
+                    adjusted,
+                    attention_decode_execution_time=
+                    adjusted.attention_decode_execution_time + penalty_us,
+                )
+            elif stage_type == StageType.PREFILL:
+                adjusted = _clone_execution_time(
+                    adjusted,
+                    attention_prefill_execution_time=
+                    adjusted.attention_prefill_execution_time + penalty_us,
+                )
+
         if self._tuning.energy_reporting:
             self._accumulate_energy(adjusted.total_time)
         return adjusted
+
+    def _estimate_stage_bytes(self, batch: Batch, stage_type: StageType, replica_scheduler) -> float:
+        model_config = getattr(replica_scheduler, "model_config", None)
+        hidden_dim = getattr(model_config, "embedding_dim", 4096)
+        num_layers = getattr(model_config, "num_layers", 1)
+
+        dtype_bytes = self._dtype_bytes
+
+        if stage_type == StageType.PREFILL:
+            tokens = max(batch.num_prefill_tokens, 0)
+            bytes_per_token = hidden_dim * dtype_bytes * 3  # Q, K, V projections
+        elif stage_type == StageType.DECODE:
+            tokens = max(batch.num_decode_tokens, batch.size)
+            bytes_per_token = hidden_dim * dtype_bytes * 2  # K and V fetches
+        else:
+            return 0.0
+
+        return float(tokens * bytes_per_token * num_layers)
 
     def _accumulate_energy(self, stage_time_s: float) -> None:
         hardware = self._tuning.hardware
@@ -379,6 +513,10 @@ class ChiplasticRuntime:
             "active_compute": float(self.active_compute),
             "active_memory": float(self.active_memory),
             "memory_pressure": observation.memory_pressure,
+            "remote_fraction": observation.remote_profile.remote_fraction,
+            "remote_latency_ms": observation.remote_latency_ms,
+            "remote_bytes": observation.remote_bytes,
+            "local_bytes": observation.local_bytes,
             "energy_joules_total": self._energy_joules,
         }
         self._history.append(entry)

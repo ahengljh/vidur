@@ -14,7 +14,8 @@ for Elastic LLM Inference on Chiplet GPUs*.
   round-robin request routing and exports per-replica Chiplastic traces on
   simulation completion.
 - **ChiplasticRuntime** models elastic scaling states (base, memory, compute,
-  bandwidth), provides a simple energy model, and logs stage-level telemetry to
+  bandwidth), now tracks per-stage local/remote KV utilisation, interconnect
+  latency, and energy, logging telemetry to
   `simulator_output/chiplastic_replica_<ID>.json`.
 
 ## Configuration
@@ -46,6 +47,8 @@ For each replica, a JSON trace captures:
 - Stage type, base vs adjusted latency (ms)
 - Active compute/memory die counts and scaling state
 - Memory pressure and cumulative energy estimate (J)
+- Remote KV fraction, effective remote bytes transferred, and per-stage
+  interconnect latency, enabling latency breakdown plots for the paper.
 
 These traces are written alongside standard Vidur metrics and can be consumed
 for the evaluations outlined in the Chiplastic paper (tail latency, throughput,
