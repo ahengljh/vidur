@@ -1,6 +1,7 @@
 from typing import List
 
 from vidur.events import BaseEvent
+from vidur.entities import ExecutionTime
 from vidur.logger import init_logger
 from vidur.metrics import MetricsStore
 from vidur.scheduler import BaseGlobalScheduler
@@ -34,13 +35,29 @@ class ReplicaStageScheduleEvent(BaseEvent):
         if not (self._batch and self._batch_stage):
             return []
 
+        replica_scheduler = scheduler._replica_schedulers[self._replica_id]
+        adjusted_execution_time = execution_time
+        if stage_scheduler.is_last_stage:
+            adjust_fn = getattr(replica_scheduler, "maybe_apply_chiplastic", None)
+            if callable(adjust_fn):
+                candidate = adjust_fn(
+                    now=self.time,
+                    batch=self._batch,
+                    batch_stage=self._batch_stage,
+                    execution_time=execution_time,
+                )
+                if isinstance(candidate, ExecutionTime):
+                    adjusted_execution_time = candidate
+                    self._batch_stage._execution_time = adjusted_execution_time.total_time
+                    self._batch_stage._model_execution_time = adjusted_execution_time.model_time
+
         self._batch_stage.on_schedule(self.time)
         metrics_store.on_replica_stage_schedule(
             self.time,
             self._replica_id,
             self._stage_id,
             self._batch_stage,
-            execution_time,
+            adjusted_execution_time,
         )
 
         self._is_last_stage = stage_scheduler.is_last_stage

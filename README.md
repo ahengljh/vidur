@@ -125,6 +125,23 @@ or to get information on all parameters,
 python -m vidur.main -h
 ```
 
+### Chiplastic (Chiplet-Aware) Experiments
+
+To enable the elastic chiplet runtime introduced in
+`Chiplastic: Hardware-Software Co-Design for Elastic LLM Inference on Chiplet GPUs`,
+select the Chiplastic scheduler pair:
+
+```sh
+python -m vidur.main \
+  --cluster_config_global_scheduler_config_type chiplastic \
+  --cluster_config_replica_scheduler_config_type chiplastic_sarathi
+```
+
+Additional tuning knobs (e.g., scaling thresholds, hardware limits) are
+available under the nested `chiplastic` configuration. Refer to
+[`docs/chiplastic.md`](docs/chiplastic.md) for guidance on reproducing the
+experiments presented in the paper.
+
 ## Simulator Output
 
 * The metrics will be logged to wandb directly and a copy will be stored in the `simulator_output/<TIMESTAMP>` directory. __A description of all the logged metrics can be found [here](docs/metrics.md).__
@@ -165,4 +182,3 @@ trademarks or logos is subject to and must follow
 [Microsoft's Trademark & Brand Guidelines](https://www.microsoft.com/en-us/legal/intellectualproperty/trademarks/usage/general).
 Use of Microsoft trademarks or logos in modified versions of this project must not cause confusion or imply Microsoft sponsorship.
 Any use of third-party trademarks or logos are subject to those third-party's policies.
-

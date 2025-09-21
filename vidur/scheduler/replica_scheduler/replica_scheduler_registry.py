@@ -10,6 +10,9 @@ from vidur.scheduler.replica_scheduler.orca_replica_scheduler import (
 from vidur.scheduler.replica_scheduler.sarathi_replica_scheduler import (
     SarathiReplicaScheduler,
 )
+from vidur.scheduler.replica_scheduler.chiplastic_sarathi_replica_scheduler import (
+    ChiplasticSarathiReplicaScheduler,
+)
 from vidur.scheduler.replica_scheduler.vllm_replica_scheduler import (
     VLLMReplicaScheduler,
 )
@@ -29,4 +32,7 @@ ReplicaSchedulerRegistry.register(ReplicaSchedulerType.SARATHI, SarathiReplicaSc
 ReplicaSchedulerRegistry.register(ReplicaSchedulerType.VLLM, VLLMReplicaScheduler)
 ReplicaSchedulerRegistry.register(
     ReplicaSchedulerType.LIGHTLLM, LightLLMReplicaScheduler
+)
+ReplicaSchedulerRegistry.register(
+    ReplicaSchedulerType.CHIPLASTIC_SARATHI, ChiplasticSarathiReplicaScheduler
 )

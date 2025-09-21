@@ -60,3 +60,7 @@ class BaseGlobalScheduler(ABC):
     @abstractmethod
     def schedule(self) -> List[Tuple[int, Request]]:
         pass
+
+    def on_simulation_end(self) -> None:
+        """Hook invoked once simulation terminates."""
+        return None

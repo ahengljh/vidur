@@ -82,6 +82,9 @@ class Simulator:
     def _write_output(self) -> None:
         logger.info("Writing output")
 
+        if hasattr(self._scheduler, "on_simulation_end"):
+            self._scheduler.on_simulation_end()
+
         self._metric_store.plot()
         logger.info("Metrics written")
 

@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import List, Optional
 
+from vidur.chiplastic.config import ChiplasticTuningConfig
 from vidur.config.base_poly_config import BasePolyConfig
 from vidur.config.device_sku_config import BaseDeviceSKUConfig
 from vidur.config.flat_dataclass import create_flat_dataclass
@@ -329,6 +330,18 @@ class SarathiSchedulerConfig(BaseReplicaSchedulerConfig):
 
 
 @dataclass
+class ChiplasticSarathiSchedulerConfig(SarathiSchedulerConfig):
+    chiplastic: ChiplasticTuningConfig = field(
+        default_factory=ChiplasticTuningConfig,
+        metadata={"help": "Chiplastic tuning knobs."},
+    )
+
+    @staticmethod
+    def get_type():
+        return ReplicaSchedulerType.CHIPLASTIC_SARATHI
+
+
+@dataclass
 class MetricsConfig:
     """Metric configuration."""
 
@@ -488,6 +501,13 @@ class LORGlobalSchedulerConfig(BaseGlobalSchedulerConfig):
     @staticmethod
     def get_type():
         return GlobalSchedulerType.LOR
+
+
+@dataclass
+class ChiplasticGlobalSchedulerConfig(BaseGlobalSchedulerConfig):
+    @staticmethod
+    def get_type():
+        return GlobalSchedulerType.CHIPLASTIC
 
 
 @dataclass
