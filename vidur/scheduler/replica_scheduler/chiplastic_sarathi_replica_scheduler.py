@@ -1,10 +1,7 @@
 from typing import Dict, List, Optional
 
-from vidur.chiplastic import (
-    ChipletMemoryManager,
-    ChiplasticRuntime,
-    ChiplasticTuningConfig,
-)
+from vidur.chiplastic import ChipletMemoryManager, ChiplasticTuningConfig
+from vidur.chiplastic.runtime import ChiplasticRuntime
 from vidur.entities import Batch, BatchStage, ExecutionTime
 from vidur.scheduler.replica_scheduler.sarathi_replica_scheduler import (
     SarathiReplicaScheduler,

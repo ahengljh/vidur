@@ -1,9 +1,4 @@
-"""Chiplastic runtime support for Vidur.
-
-This package contains the core control/measurement primitives
-needed to simulate elastic chiplet-aware execution described in
-Chiplastic (HPCA'26 submission).
-"""
+"""Core configuration helpers for the Chiplastic extensions."""
 
 from vidur.chiplastic.config import (
     ChiplasticHardwareConfig,
@@ -11,15 +6,12 @@ from vidur.chiplastic.config import (
     ChiplasticTuningConfig,
 )
 from vidur.chiplastic.memory import ChipletMemoryManager, RemoteAccessProfile
-from vidur.chiplastic.runtime import ChiplasticRuntime, ScalingState
 from vidur.chiplastic.interconnect import InterconnectModel
 
 __all__ = [
     "ChiplasticHardwareConfig",
     "ChiplasticScalingThresholds",
     "ChiplasticTuningConfig",
-    "ChiplasticRuntime",
-    "ScalingState",
     "ChipletMemoryManager",
     "RemoteAccessProfile",
     "InterconnectModel",
