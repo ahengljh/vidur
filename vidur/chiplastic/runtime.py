@@ -289,6 +289,8 @@ class ChiplasticRuntime:
             base_latency_ns=tuning.hardware.interconnect_latency_ns,
         )
         self._energy_joules = 0.0
+        self._compute_energy_j = 0.0
+        self._memory_energy_j = 0.0
         self._dtype_bytes = tuning.hardware.kv_block_dtype_bytes
 
     @property
@@ -370,6 +372,27 @@ class ChiplasticRuntime:
         path = os.path.join(output_dir, f"chiplastic_replica_{self._replica_id}.json")
         with open(path, "w", encoding="utf-8") as handle:
             json.dump(self._history, handle, indent=2)
+
+        summary = {
+            "replica_id": self._replica_id,
+            "total_energy_joules": self._energy_joules,
+            "compute_energy_joules": self._compute_energy_j,
+            "memory_energy_joules": self._memory_energy_j,
+            "final_active_compute": self.active_compute,
+            "final_active_memory": self.active_memory,
+            "history_entries": len(self._history),
+        }
+        if self._history:
+            summary["duration_seconds"] = self._history[-1]["time"]
+            if summary["duration_seconds"] > 0:
+                summary["avg_power_watts"] = (
+                    self._energy_joules / summary["duration_seconds"]
+                )
+        summary_path = os.path.join(
+            output_dir, f"chiplastic_replica_{self._replica_id}_energy.json"
+        )
+        with open(summary_path, "w", encoding="utf-8") as handle:
+            json.dump(summary, handle, indent=2)
 
     def _apply_scaling(
         self,
@@ -496,7 +519,9 @@ class ChiplasticRuntime:
         memory_energy = (
             self.active_memory * hardware.memory_active_power_w * stage_time_s
         )
-        self._energy_joules += compute_energy + memory_energy
+        self._compute_energy_j += compute_energy
+        self._memory_energy_j += memory_energy
+        self._energy_joules = self._compute_energy_j + self._memory_energy_j
 
     def _record_history(
         self,
@@ -518,7 +543,12 @@ class ChiplasticRuntime:
             "remote_bytes": observation.remote_bytes,
             "local_bytes": observation.local_bytes,
             "energy_joules_total": self._energy_joules,
+            "compute_energy_joules_total": self._compute_energy_j,
+            "memory_energy_joules_total": self._memory_energy_j,
         }
+        duration = now if now > 0 else None
+        if duration:
+            entry["avg_power_watts"] = self._energy_joules / duration
         self._history.append(entry)
 
     @staticmethod
