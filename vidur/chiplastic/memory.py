@@ -21,6 +21,8 @@ class RemoteAccessProfile:
     local_fraction: float
     remote_blocks: int
     total_blocks: int
+    numa_distribution: Dict[int, int] = field(default_factory=dict)  # NUMA node -> block count
+    avg_numa_distance: float = 10.0
 
 
 @dataclass
@@ -48,6 +50,8 @@ class ChipletMemoryManager:
         self._next_block_id = 0
         self._base_memory_dies = tuning.hardware.base_memory_dies
         self._blocks_per_die = max(1, tuning.hardware.kv_blocks_per_die)
+        self._numa_nodes = tuning.hardware.numa_nodes
+        self._numa_mapping: Dict[int, int] = {}  # die_id -> numa_node
 
         for _ in range(self._base_memory_dies):
             self._add_die(tier="base")
@@ -76,16 +80,22 @@ class ChipletMemoryManager:
             return []
 
         chosen_blocks: List[str] = []
-        preferred_dies = self._local_die_ids()
-        helper_dies = [die_id for die_id in self._dies if die_id not in preferred_dies]
 
-        for _ in range(num_blocks):
-            block = self._try_allocate_from(preferred_dies)
-            if not block and helper_dies:
-                block = self._try_allocate_from(helper_dies)
-            if not block:
-                raise RuntimeError("Insufficient KV cache capacity for allocation")
-            chosen_blocks.append(block.block_id)
+        if self._tuning.enable_numa_aware_placement:
+            # NUMA-aware allocation strategy
+            chosen_blocks = self._allocate_numa_aware(request_id, num_blocks, locality_bias)
+        else:
+            # Original allocation strategy
+            preferred_dies = self._local_die_ids()
+            helper_dies = [die_id for die_id in self._dies if die_id not in preferred_dies]
+
+            for _ in range(num_blocks):
+                block = self._try_allocate_from(preferred_dies)
+                if not block and helper_dies:
+                    block = self._try_allocate_from(helper_dies)
+                if not block:
+                    raise RuntimeError("Insufficient KV cache capacity for allocation")
+                chosen_blocks.append(block.block_id)
 
         self._allocations.setdefault(request_id, []).extend(chosen_blocks)
         return chosen_blocks
@@ -126,18 +136,43 @@ class ChipletMemoryManager:
             block_ids.extend(self._allocations.get(rid, []))
         total_blocks = len(block_ids)
         if total_blocks == 0:
-            return RemoteAccessProfile(remote_fraction=0.0, local_fraction=1.0, remote_blocks=0, total_blocks=0)
+            return RemoteAccessProfile(
+                remote_fraction=0.0,
+                local_fraction=1.0,
+                remote_blocks=0,
+                total_blocks=0,
+                numa_distribution={},
+                avg_numa_distance=10.0
+            )
 
         local_die_cutoff = min(active_compute, active_memory, len(self._dies))
         local_die_ids = set(sorted(self._dies.keys())[:local_die_cutoff])
 
         remote_blocks = sum(1 for block_id in block_ids if self._block_home.get(block_id) not in local_die_ids)
         remote_fraction = remote_blocks / total_blocks
+
+        # Calculate NUMA distribution
+        numa_distribution = {}
+        total_distance = 0
+        for block_id in block_ids:
+            die_id = self._block_home.get(block_id, 0)
+            numa_node = self._numa_mapping.get(die_id, 0)
+            numa_distribution[numa_node] = numa_distribution.get(numa_node, 0) + 1
+            # Simple distance calculation (can be enhanced)
+            if die_id not in local_die_ids:
+                total_distance += 20  # Remote NUMA distance
+            else:
+                total_distance += 10  # Local NUMA distance
+
+        avg_numa_distance = total_distance / max(total_blocks, 1)
+
         return RemoteAccessProfile(
             remote_fraction=remote_fraction,
             local_fraction=1.0 - remote_fraction,
             remote_blocks=remote_blocks,
             total_blocks=total_blocks,
+            numa_distribution=numa_distribution,
+            avg_numa_distance=avg_numa_distance,
         )
 
     def blocks_assigned_to(self, die_id: int) -> int:
@@ -156,6 +191,8 @@ class ChipletMemoryManager:
         blocks = [self._new_block_id(die_id) for _ in range(self._blocks_per_die)]
         die = MemoryDie(die_id=die_id, capacity_blocks=len(blocks), tier=tier, free_blocks=blocks)
         self._dies[die_id] = die
+        # Map die to NUMA node
+        self._numa_mapping[die_id] = die_id % self._numa_nodes
 
     def _remove_die(self, die_id: int) -> None:
         die = self._dies.pop(die_id, None)
@@ -181,3 +218,33 @@ class ChipletMemoryManager:
             block_id = die.free_blocks.pop()
             return MemoryBlock(block_id=block_id, die_id=die_id)
         return None
+
+    def _allocate_numa_aware(self, request_id: int, num_blocks: int, locality_bias: float) -> List[str]:
+        """NUMA-aware block allocation strategy."""
+        chosen_blocks: List[str] = []
+
+        # Group dies by NUMA node
+        numa_dies: Dict[int, List[int]] = {}
+        for die_id in self._dies:
+            numa_node = self._numa_mapping.get(die_id, 0)
+            numa_dies.setdefault(numa_node, []).append(die_id)
+
+        # Prioritize local NUMA nodes (assuming compute die 0 is primary)
+        primary_numa = self._numa_mapping.get(0, 0)
+        ordered_nodes = [primary_numa] + [n for n in numa_dies if n != primary_numa]
+
+        # Allocate blocks with NUMA locality preference
+        for _ in range(num_blocks):
+            allocated = False
+            for numa_node in ordered_nodes:
+                dies = numa_dies.get(numa_node, [])
+                block = self._try_allocate_from(dies)
+                if block:
+                    chosen_blocks.append(block.block_id)
+                    allocated = True
+                    break
+
+            if not allocated:
+                raise RuntimeError("Insufficient KV cache capacity for NUMA-aware allocation")
+
+        return chosen_blocks

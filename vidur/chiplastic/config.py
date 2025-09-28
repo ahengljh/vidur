@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from typing import Dict, List
 
 
 @dataclass
@@ -10,6 +11,9 @@ class ChiplasticScalingThresholds:
     prefill_latency_target_ms: float = 25.0
     decode_latency_target_ms: float = 6.0
     cooldown_steps: int = 4
+    thermal_throttle_temp_c: float = 75.0
+    frequency_boost_threshold: float = 0.85
+    frequency_reduce_threshold: float = 0.3
 
 
 @dataclass
@@ -31,6 +35,20 @@ class ChiplasticHardwareConfig:
     remote_penalty_factor: float = 0.35
     interconnect_bandwidth_tbps: float = 1.6
     interconnect_latency_ns: float = 180.0
+    # Enhanced hardware configs
+    base_freq_ghz: float = 1.5
+    boost_freq_ghz: float = 2.5
+    min_freq_ghz: float = 0.8
+    freq_steps: int = 16
+    freq_transition_latency_us: float = 10.0
+    thermal_design_power_w: float = 300.0
+    max_temp_c: float = 85.0
+    thermal_resistance: float = 0.15
+    thermal_capacitance: float = 100.0
+    numa_nodes: int = 4
+    numa_local_latency_ns: float = 50.0
+    numa_remote_latency_ns: float = 150.0
+    numa_far_latency_ns: float = 300.0
 
     def __post_init__(self) -> None:
         if self.base_compute_dies <= 0 or self.base_memory_dies <= 0:
@@ -57,6 +75,13 @@ class ChiplasticTuningConfig:
     dispatch_locality_bias: float = 0.7
     energy_reporting: bool = True
     enable_logging: bool = True
+    # Enhanced tuning configs
+    enable_frequency_scaling: bool = True
+    enable_thermal_management: bool = True
+    enable_numa_aware_placement: bool = True
+    enable_granular_compute_control: bool = True
+    power_efficiency_mode: bool = False
+    adaptive_scaling_alpha: float = 0.25
 
     def __post_init__(self) -> None:
         if not (0.0 <= self.prefetch_effectiveness <= 1.0):

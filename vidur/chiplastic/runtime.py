@@ -26,6 +26,7 @@ class ScalingState(Enum):
     MEMORY = auto()
     COMPUTE = auto()
     BANDWIDTH = auto()
+    HYBRID = auto()  # Both compute and memory scaled
 
 
 @dataclass
@@ -34,6 +35,8 @@ class ScalingDecision:
     target_compute: int
     target_memory: int
     reason: str
+    compute_frequencies: Dict[int, float] = None
+    predicted_improvement: float = 0.0
 
 
 @dataclass
@@ -52,6 +55,10 @@ class StageObservation:
     remote_latency_ms: float
     remote_bytes: float
     local_bytes: float
+    numa_distance: int = 10  # NUMA distance metric
+    temperature_c: float = 25.0  # Current temperature
+    power_w: float = 0.0  # Current power consumption
+    compute_utilization: Dict[str, float] = None  # Per-component utilization
 
     @property
     def latency_ms(self) -> float:
@@ -174,27 +181,79 @@ class ChiplasticController:
         self._cooldown = 0
         self._prefill_avg_ms = 0.0
         self._decode_avg_ms = 0.0
-        self._alpha = 0.25
+        self._alpha = tuning.adaptive_scaling_alpha
+        # Enhanced state tracking
+        self._compute_frequencies: Dict[int, float] = {}
+        self._temperatures: Dict[int, float] = {}
+        self._power_states: Dict[int, float] = {}
+        self._numa_topology: Dict[int, Dict[int, int]] = {}
+        self._initialize_enhanced_state()
+
+    def _initialize_enhanced_state(self) -> None:
+        """Initialize enhanced state tracking for compute resources."""
+        for i in range(self._tuning.hardware.max_compute_dies):
+            self._compute_frequencies[i] = self._tuning.hardware.base_freq_ghz
+            self._temperatures[i] = 25.0
+            self._power_states[i] = self._tuning.hardware.compute_idle_power_w
+
+        # Initialize NUMA topology
+        self._initialize_numa_topology()
+
+    def _initialize_numa_topology(self) -> None:
+        """Initialize NUMA distance matrix."""
+        num_nodes = self._tuning.hardware.numa_nodes
+        dies_per_node = self._tuning.hardware.max_compute_dies // num_nodes
+
+        for i in range(self._tuning.hardware.max_compute_dies):
+            self._numa_topology[i] = {}
+            node_i = i // dies_per_node
+            for j in range(self._tuning.hardware.max_memory_dies):
+                node_j = j // dies_per_node
+                if node_i == node_j:
+                    self._numa_topology[i][j] = 10  # Local
+                elif abs(node_i - node_j) == 1:
+                    self._numa_topology[i][j] = 20  # Adjacent
+                else:
+                    self._numa_topology[i][j] = 30  # Remote
 
     def update(self, observation: StageObservation) -> ScalingDecision:
         self._update_latency_ema(observation)
+        self._update_thermal_state(observation)
+
         if self._cooldown > 0:
             self._cooldown -= 1
-            return ScalingDecision(self._infer_state(), self.active_compute, self.active_memory, "cooldown")
+            return ScalingDecision(
+                self._infer_state(),
+                self.active_compute,
+                self.active_memory,
+                "cooldown",
+                self._compute_frequencies
+            )
 
         thresholds = self._tuning.thresholds
         hardware = self._tuning.hardware
         reason = "steady"
         target_compute = self.active_compute
         target_memory = self.active_memory
+        predicted_improvement = 0.0
+
+        # Consider thermal throttling
+        if observation.temperature_c > thresholds.thermal_throttle_temp_c:
+            if self._tuning.enable_frequency_scaling:
+                self._adjust_frequencies_for_thermal(observation)
+                reason = "thermal_throttle"
 
         if observation.stage_type == StageType.PREFILL:
-            if (
-                observation.latency_ms > thresholds.prefill_latency_target_ms
-                and self.active_compute < hardware.max_compute_dies
-            ):
-                target_compute = self.active_compute + 1
-                reason = "prefill_latency"
+            if observation.latency_ms > thresholds.prefill_latency_target_ms:
+                # Try frequency boost first if enabled
+                if self._tuning.enable_frequency_scaling and self._can_boost_frequency():
+                    self._boost_compute_frequencies()
+                    predicted_improvement = 0.15
+                    reason = "prefill_frequency_boost"
+                elif self.active_compute < hardware.max_compute_dies:
+                    target_compute = self.active_compute + 1
+                    predicted_improvement = 1.0 / self.active_compute
+                    reason = "prefill_latency"
         elif observation.stage_type == StageType.DECODE:
             remote_latency = observation.remote_latency_ms
             remote_fraction = observation.remote_profile.remote_fraction
@@ -238,10 +297,24 @@ class ChiplasticController:
             self.active_memory = target_memory
             self.state = self._infer_state()
             self._cooldown = thresholds.cooldown_steps
-            return ScalingDecision(self.state, target_compute, target_memory, reason)
+            return ScalingDecision(
+                self.state,
+                target_compute,
+                target_memory,
+                reason,
+                self._compute_frequencies,
+                predicted_improvement
+            )
 
         self.state = self._infer_state()
-        return ScalingDecision(self.state, target_compute, target_memory, reason)
+        return ScalingDecision(
+            self.state,
+            target_compute,
+            target_memory,
+            reason,
+            self._compute_frequencies,
+            predicted_improvement
+        )
 
     def _update_latency_ema(self, observation: StageObservation) -> None:
         latency = observation.latency_ms
@@ -267,7 +340,65 @@ class ChiplasticController:
             return ScalingState.MEMORY
         if self.active_compute > base_compute and self.active_memory == base_memory:
             return ScalingState.COMPUTE
+        if self.active_compute > base_compute and self.active_memory > base_memory:
+            return ScalingState.HYBRID
         return ScalingState.BANDWIDTH
+
+    def _update_thermal_state(self, observation: StageObservation) -> None:
+        """Update thermal state based on power consumption."""
+        if not self._tuning.enable_thermal_management:
+            return
+
+        dt = 0.001  # Time step
+        for i in range(self.active_compute):
+            power = self._calculate_die_power(i, observation)
+            temp_rise = (power * self._tuning.hardware.thermal_resistance -
+                        (self._temperatures[i] - 25.0)) * dt / self._tuning.hardware.thermal_capacitance
+            self._temperatures[i] = _clamp(
+                self._temperatures[i] + temp_rise,
+                25.0,
+                self._tuning.hardware.max_temp_c
+            )
+
+    def _calculate_die_power(self, die_id: int, observation: StageObservation) -> float:
+        """Calculate power consumption for a compute die."""
+        if die_id >= self.active_compute:
+            return self._tuning.hardware.compute_idle_power_w
+
+        base_power = self._tuning.hardware.compute_active_power_w
+        freq_ratio = self._compute_frequencies[die_id] / self._tuning.hardware.base_freq_ghz
+
+        # Power scales with frequency squared (simplified model)
+        power = base_power * (freq_ratio ** 2)
+
+        # Scale by utilization
+        if observation.compute_utilization:
+            avg_util = sum(observation.compute_utilization.values()) / len(observation.compute_utilization)
+            power *= avg_util
+
+        return power
+
+    def _can_boost_frequency(self) -> bool:
+        """Check if frequency boost is possible."""
+        max_temp = max(self._temperatures[i] for i in range(self.active_compute))
+        return max_temp < self._tuning.thresholds.thermal_throttle_temp_c
+
+    def _boost_compute_frequencies(self) -> None:
+        """Boost compute frequencies for active dies."""
+        for i in range(self.active_compute):
+            current_freq = self._compute_frequencies[i]
+            max_freq = self._tuning.hardware.boost_freq_ghz
+            self._compute_frequencies[i] = min(current_freq * 1.2, max_freq)
+
+    def _adjust_frequencies_for_thermal(self, observation: StageObservation) -> None:
+        """Adjust frequencies to manage thermal constraints."""
+        for i in range(self.active_compute):
+            if self._temperatures[i] > self._tuning.thresholds.thermal_throttle_temp_c:
+                self._compute_frequencies[i] *= 0.9
+                self._compute_frequencies[i] = max(
+                    self._compute_frequencies[i],
+                    self._tuning.hardware.min_freq_ghz
+                )
 
 
 class ChiplasticRuntime:
@@ -561,3 +692,156 @@ class ChiplasticRuntime:
             # Mixed batches occur during streaming decode; treat as decode-dominant
             return StageType.DECODE
         return StageType.OTHER
+
+    def _calculate_numa_distance(self) -> int:
+        """Calculate average NUMA distance for active resources."""
+        if not self._tuning.enable_numa_aware_placement:
+            return 10
+
+        total_distance = 0
+        count = 0
+
+        for compute_die in range(self.active_compute):
+            for memory_die in range(self.active_memory):
+                distance = self._numa_distances.get(compute_die, {}).get(memory_die, 10)
+                total_distance += distance
+                count += 1
+
+        return total_distance // max(count, 1) if count > 0 else 10
+
+    def _numa_distance_to_hops(self, distance: int) -> int:
+        """Convert NUMA distance to hop count."""
+        if distance <= 10:
+            return 1
+        elif distance <= 20:
+            return 2
+        else:
+            return 3
+
+    def _estimate_compute_utilization(
+        self, batch: Batch, stage_type: StageType, execution_time: ExecutionTime
+    ) -> Dict[str, float]:
+        """Estimate utilization of different compute components."""
+        if not execution_time:
+            return {}
+
+        total_time = execution_time.total_time
+        if total_time <= 0:
+            return {}
+
+        utilization = {}
+
+        if stage_type == StageType.PREFILL:
+            utilization["attention"] = execution_time.attention_prefill_execution_time / total_time
+            utilization["mlp"] = (
+                execution_time.mlp_layer_up_proj_execution_time +
+                execution_time.mlp_layer_down_proj_execution_time
+            ) / total_time
+        elif stage_type == StageType.DECODE:
+            utilization["attention"] = execution_time.attention_decode_execution_time / total_time
+            utilization["mlp"] = execution_time.mlp_layer_act_execution_time / total_time
+        else:
+            utilization["attention"] = 0.0
+            utilization["mlp"] = 0.0
+
+        utilization["norm"] = (
+            execution_time.attn_norm_time + execution_time.mlp_norm_time
+        ) / total_time
+        utilization["communication"] = execution_time.mlp_all_reduce_time / total_time
+
+        self._compute_utilization = utilization
+        return utilization
+
+    def _get_max_temperature(self) -> float:
+        """Get maximum temperature across active compute dies."""
+        if not self._tuning.enable_thermal_management:
+            return 25.0
+
+        return max(
+            self._controller._temperatures.get(i, 25.0)
+            for i in range(self.active_compute)
+        )
+
+    def _calculate_total_power(self) -> float:
+        """Calculate total power consumption."""
+        total_power = 0.0
+
+        # Compute power
+        for i in range(self.active_compute):
+            total_power += self._controller._power_states.get(
+                i, self._tuning.hardware.compute_idle_power_w
+            )
+
+        # Memory power
+        total_power += self.active_memory * self._tuning.hardware.memory_active_power_w
+
+        return total_power
+
+    def _calculate_effective_compute_capacity(self) -> float:
+        """Calculate effective compute capacity with frequency scaling."""
+        if not self._tuning.enable_frequency_scaling:
+            return self.active_compute * self._tuning.hardware.compute_tflops_per_die
+
+        total_capacity = 0.0
+        for i in range(self.active_compute):
+            freq_ratio = (
+                self._controller._compute_frequencies.get(i, self._tuning.hardware.base_freq_ghz) /
+                self._tuning.hardware.base_freq_ghz
+            )
+            total_capacity += self._tuning.hardware.compute_tflops_per_die * freq_ratio
+
+        return total_capacity
+
+    def _calculate_numa_bandwidth_modifier(self, numa_distance: int) -> float:
+        """Calculate bandwidth modifier based on NUMA distance."""
+        if not self._tuning.enable_numa_aware_placement:
+            return 1.0
+
+        # Local access = 1.0, adjacent = 0.8, remote = 0.5
+        if numa_distance <= 10:
+            return 1.0
+        elif numa_distance <= 20:
+            return 0.8
+        else:
+            return 0.5
+
+    def _scale_execution_time_granular(
+        self,
+        execution_time: ExecutionTime,
+        compute_scale: float,
+        memory_scale: float,
+        utilization: Dict[str, float],
+    ) -> ExecutionTime:
+        """Apply granular scaling based on component utilization."""
+        if not utilization:
+            # Fallback to regular scaling
+            return _scale_execution_time(execution_time, compute_scale, memory_scale)
+
+        # Scale different components based on their resource requirements
+        attention_scale = compute_scale if utilization.get("attention", 0) > 0.5 else memory_scale
+        mlp_scale = compute_scale
+        norm_scale = (compute_scale + memory_scale) / 2
+        comm_scale = 1.0  # Communication doesn't scale with compute/memory
+
+        return ExecutionTime(
+            num_layers_per_pipeline_stage=execution_time.num_layers,
+            attention_rope_execution_time=execution_time.attention_rope_execution_time * memory_scale,
+            attention_kv_cache_save_execution_time=execution_time.attention_kv_cache_save_execution_time * memory_scale,
+            attention_decode_execution_time=execution_time.attention_decode_execution_time * attention_scale,
+            attention_prefill_execution_time=execution_time.attention_prefill_execution_time * attention_scale,
+            attention_layer_pre_proj_execution_time=execution_time.attention_pre_proj_time * compute_scale,
+            attention_layer_post_proj_execution_time=execution_time.attention_post_proj_time * compute_scale,
+            mlp_layer_up_proj_execution_time=execution_time.mlp_layer_up_proj_execution_time * mlp_scale,
+            mlp_layer_down_proj_execution_time=execution_time.mlp_layer_down_proj_execution_time * mlp_scale,
+            mlp_layer_act_execution_time=execution_time.mlp_layer_act_execution_time * mlp_scale,
+            attn_norm_time=execution_time.attn_norm_time * norm_scale,
+            mlp_norm_time=execution_time.mlp_norm_time * norm_scale,
+            add_time=execution_time.add_time * compute_scale,
+            tensor_parallel_communication_time=execution_time.mlp_all_reduce_time * comm_scale,
+            pipeline_parallel_communication_time=execution_time.pipeline_parallel_communication_time,
+            schedule_time=execution_time.schedule_time,
+            sampler_e2e_time=execution_time.sampler_e2e_time,
+            prepare_inputs_e2e_time=execution_time.prepare_inputs_e2e_time,
+            process_model_outputs_time=execution_time.process_model_outputs_time,
+            ray_comm_time=execution_time.ray_comm_time,
+        )
