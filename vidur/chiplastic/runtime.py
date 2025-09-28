@@ -279,14 +279,31 @@ class ChiplasticController:
                 reason = "bandwidth_assist"
 
         if reason == "steady":
-            # Only scale down if we have very low utilization for a while
+            # Try memory consolidation when utilization is low
             if (
-                observation.memory_pressure < thresholds.memory_utilization_scale_down * 0.8  # More conservative
+                self._tuning.enable_memory_consolidation
+                and observation.memory_pressure < self._tuning.consolidation_threshold
                 and self.active_memory > hardware.base_memory_dies
                 and self._cooldown == 0  # Only when not in cooldown
             ):
-                target_memory = max(hardware.base_memory_dies, self.active_memory - 1)
-                reason = "memory_scale_down"
+                # Check if we can consolidate to fewer dies
+                total_blocks_needed = observation.allocated_blocks
+                blocks_per_die = self._tuning.hardware.kv_blocks_per_die
+                min_dies_needed = max(
+                    (total_blocks_needed + blocks_per_die - 1) // blocks_per_die,
+                    hardware.base_memory_dies
+                )
+
+                if min_dies_needed < self.active_memory:
+                    # We can consolidate
+                    target_memory = min_dies_needed
+                    reason = "memory_consolidation"
+                    predicted_improvement = (self.active_memory - target_memory) * \
+                                          hardware.memory_active_power_w / 1000.0  # Power savings
+                else:
+                    # Try normal scale down
+                    target_memory = max(hardware.base_memory_dies, self.active_memory - 1)
+                    reason = "memory_scale_down"
             elif (
                 self._prefill_avg_ms < thresholds.prefill_latency_target_ms * 0.5  # More conservative
                 and self._decode_avg_ms < thresholds.decode_latency_target_ms * 0.5
@@ -558,7 +575,15 @@ class ChiplasticRuntime:
         return added == count
 
     def _shrink_memory(self, replica_scheduler, count: int) -> bool:
-        # Check if we can actually remove the requested dies
+        # First try to consolidate memory if enabled and possible
+        if self._tuning.enable_memory_consolidation and self._memory_manager.can_consolidate_memory():
+            freed = self._memory_manager.consolidate_memory()
+            if freed > 0:
+                replica_scheduler._config.num_blocks = self._memory_manager.total_blocks
+                logger.debug("Consolidated memory and freed %d dies", freed)
+                return freed >= count
+
+        # If consolidation wasn't enough, check for directly removable dies
         removable_count = self._memory_manager.get_removable_helper_dies_count()
         if removable_count == 0:
             return False  # Cannot shrink, all dies have allocated blocks

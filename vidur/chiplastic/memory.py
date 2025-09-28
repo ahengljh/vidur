@@ -124,6 +124,83 @@ class ChipletMemoryManager:
                     if die.tier == "helper" and die.free_count == die.capacity_blocks]
         return len(removable)
 
+    def can_consolidate_memory(self) -> bool:
+        """Check if memory can be consolidated to fewer dies."""
+        total_allocated = sum(len(blocks) for blocks in self._allocations.values())
+        active_dies = len([d for d in self._dies.values() if d.free_count < d.capacity_blocks])
+
+        # Can consolidate if total blocks fit in fewer dies
+        min_dies_needed = (total_allocated + self._blocks_per_die - 1) // self._blocks_per_die
+        return active_dies > max(min_dies_needed, 1) and active_dies > self._base_memory_dies
+
+    def consolidate_memory(self) -> int:
+        """Consolidate memory blocks to fewer dies and return number of dies freed."""
+        if not self.can_consolidate_memory():
+            return 0
+
+        # Calculate total allocated blocks
+        total_allocated = sum(len(blocks) for blocks in self._allocations.values())
+        min_dies_needed = max((total_allocated + self._blocks_per_die - 1) // self._blocks_per_die,
+                              self._base_memory_dies)
+
+        # Get dies sorted by usage (least used first for evacuation)
+        die_usage = []
+        for die_id, die in self._dies.items():
+            used_blocks = die.capacity_blocks - die.free_count
+            die_usage.append((used_blocks, die_id, die))
+        die_usage.sort()
+
+        # Identify target dies (most filled) and source dies (least filled)
+        target_dies = [d[1] for d in die_usage[-min_dies_needed:]]
+        source_dies = [d[1] for d in die_usage[:-min_dies_needed] if d[0] > 0]
+
+        # Migrate blocks from source to target dies
+        migrated = 0
+        for request_id, block_ids in list(self._allocations.items()):
+            new_blocks = []
+            for block_id in block_ids:
+                current_die = self._block_home.get(block_id)
+
+                if current_die in source_dies:
+                    # Find a target die with free space
+                    for target_die_id in target_dies:
+                        target_die = self._dies[target_die_id]
+                        if target_die.free_blocks:
+                            # Migrate the block
+                            new_block_id = target_die.free_blocks.pop()
+                            self._block_home[new_block_id] = target_die_id
+                            new_blocks.append(new_block_id)
+
+                            # Free the old block
+                            if current_die is not None:
+                                old_die = self._dies[current_die]
+                                old_die.free_blocks.append(block_id)
+                            del self._block_home[block_id]
+
+                            migrated += 1
+                            break
+                    else:
+                        # No space in target dies, keep original
+                        new_blocks.append(block_id)
+                else:
+                    # Block already in target die
+                    new_blocks.append(block_id)
+
+            self._allocations[request_id] = new_blocks
+
+        # Remove now-empty source dies
+        freed_dies = 0
+        for die_id in source_dies:
+            die = self._dies.get(die_id)
+            if die and die.free_count == die.capacity_blocks and die.tier == "helper":
+                self._remove_die(die_id)
+                freed_dies += 1
+
+        if migrated > 0:
+            logger.info("Consolidated %d blocks, freed %d memory dies", migrated, freed_dies)
+
+        return freed_dies
+
     def remove_helper_dies(self, count: int) -> int:
         removable = [die_id for die_id, die in sorted(self._dies.items(), reverse=True) if die.tier == "helper" and die.free_count == die.capacity_blocks]
         removed = 0

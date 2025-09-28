@@ -148,6 +148,14 @@ class ChiplasticTuningConfig:
         default=0.25,
         metadata={"help": "EMA alpha for adaptive scaling decisions"}
     )
+    enable_memory_consolidation: bool = field(
+        default=True,
+        metadata={"help": "Enable memory consolidation when utilization is low"}
+    )
+    consolidation_threshold: float = field(
+        default=0.6,
+        metadata={"help": "Memory utilization threshold below which to trigger consolidation"}
+    )
 
     def __post_init__(self) -> None:
         if not (0.0 <= self.prefetch_effectiveness <= 1.0):
