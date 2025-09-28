@@ -11,9 +11,18 @@ class ChiplasticScalingThresholds:
     prefill_latency_target_ms: float = 25.0
     decode_latency_target_ms: float = 6.0
     cooldown_steps: int = 4
-    thermal_throttle_temp_c: float = 75.0
-    frequency_boost_threshold: float = 0.85
-    frequency_reduce_threshold: float = 0.3
+    thermal_throttle_temp_c: float = field(
+        default=75.0,
+        metadata={"help": "Temperature threshold for thermal throttling (Celsius)"}
+    )
+    frequency_boost_threshold: float = field(
+        default=0.85,
+        metadata={"help": "Utilization threshold to trigger frequency boost"}
+    )
+    frequency_reduce_threshold: float = field(
+        default=0.3,
+        metadata={"help": "Utilization threshold to reduce frequency"}
+    )
 
 
 @dataclass
@@ -36,19 +45,58 @@ class ChiplasticHardwareConfig:
     interconnect_bandwidth_tbps: float = 1.6
     interconnect_latency_ns: float = 180.0
     # Enhanced hardware configs
-    base_freq_ghz: float = 1.5
-    boost_freq_ghz: float = 2.5
-    min_freq_ghz: float = 0.8
-    freq_steps: int = 16
-    freq_transition_latency_us: float = 10.0
-    thermal_design_power_w: float = 300.0
-    max_temp_c: float = 85.0
-    thermal_resistance: float = 0.15
-    thermal_capacitance: float = 100.0
-    numa_nodes: int = 4
-    numa_local_latency_ns: float = 50.0
-    numa_remote_latency_ns: float = 150.0
-    numa_far_latency_ns: float = 300.0
+    base_freq_ghz: float = field(
+        default=1.5,
+        metadata={"help": "Base frequency for compute dies (GHz)"}
+    )
+    boost_freq_ghz: float = field(
+        default=2.5,
+        metadata={"help": "Maximum boost frequency for compute dies (GHz)"}
+    )
+    min_freq_ghz: float = field(
+        default=0.8,
+        metadata={"help": "Minimum frequency for compute dies (GHz)"}
+    )
+    freq_steps: int = field(
+        default=16,
+        metadata={"help": "Number of frequency scaling steps"}
+    )
+    freq_transition_latency_us: float = field(
+        default=10.0,
+        metadata={"help": "Frequency transition latency (microseconds)"}
+    )
+    thermal_design_power_w: float = field(
+        default=300.0,
+        metadata={"help": "Thermal design power (watts)"}
+    )
+    max_temp_c: float = field(
+        default=85.0,
+        metadata={"help": "Maximum operating temperature (Celsius)"}
+    )
+    thermal_resistance: float = field(
+        default=0.15,
+        metadata={"help": "Thermal resistance (K/W)"}
+    )
+    thermal_capacitance: float = field(
+        default=100.0,
+        metadata={"help": "Thermal capacitance (J/K)"}
+    )
+    numa_nodes: int = field(
+        default=4,
+        metadata={"help": "Number of NUMA nodes"}
+    )
+    numa_local_latency_ns: float = field(
+        default=50.0,
+        metadata={"help": "NUMA local access latency (nanoseconds)"}
+    )
+    numa_remote_latency_ns: float = field(
+        default=150.0,
+        metadata={"help": "NUMA remote access latency (nanoseconds)"}
+    )
+    numa_far_latency_ns: float = field(
+        default=300.0,
+        metadata={"help": "NUMA far access latency (nanoseconds)"}
+    )
 
     def __post_init__(self) -> None:
         if self.base_compute_dies <= 0 or self.base_memory_dies <= 0:
@@ -76,12 +124,30 @@ class ChiplasticTuningConfig:
     energy_reporting: bool = True
     enable_logging: bool = True
     # Enhanced tuning configs
-    enable_frequency_scaling: bool = True
-    enable_thermal_management: bool = True
-    enable_numa_aware_placement: bool = True
-    enable_granular_compute_control: bool = True
-    power_efficiency_mode: bool = False
-    adaptive_scaling_alpha: float = 0.25
+    enable_frequency_scaling: bool = field(
+        default=True,
+        metadata={"help": "Enable dynamic frequency scaling"}
+    )
+    enable_thermal_management: bool = field(
+        default=True,
+        metadata={"help": "Enable thermal throttling and management"}
+    )
+    enable_numa_aware_placement: bool = field(
+        default=True,
+        metadata={"help": "Enable NUMA-aware memory placement"}
+    )
+    enable_granular_compute_control: bool = field(
+        default=True,
+        metadata={"help": "Enable per-component compute scaling"}
+    )
+    power_efficiency_mode: bool = field(
+        default=False,
+        metadata={"help": "Enable power efficiency optimizations"}
+    )
+    adaptive_scaling_alpha: float = field(
+        default=0.25,
+        metadata={"help": "EMA alpha for adaptive scaling decisions"}
+    )
 
     def __post_init__(self) -> None:
         if not (0.0 <= self.prefetch_effectiveness <= 1.0):
