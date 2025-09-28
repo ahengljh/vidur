@@ -16,7 +16,8 @@ for Elastic LLM Inference on Chiplet GPUs*.
 - **ChiplasticRuntime** models elastic scaling states (base, memory, compute,
   bandwidth), now tracks per-stage local/remote KV utilisation, interconnect
   latency, and energy, logging telemetry to
-  `simulator_output/chiplastic_replica_<ID>.json`.
+  `simulator_output/chiplastic_replica_<ID>.json` and a companion
+  energy summary (`chiplastic_replica_<ID>_energy.json`).
 
 ## Configuration
 
@@ -66,6 +67,9 @@ energy breakdown, ablations over scaling states, etc.).
    `dispatch_locality_bias` to quantify benefits of NUMA-aware optimizations.
 4. **Energy Analysis** – leverage the exported energy counters to report energy
    per generated token and compute/memory power draw across scaling states.
+   The helper script `tools/analyze_power.py` compares the cumulative energy of
+   a baseline run against a Chiplastic run using the hardware configuration
+   stored in their `config.json` files.
 
 The provided runtime hooks and metrics simplify scripting these experiments in
 `sim.py` or bespoke notebooks.

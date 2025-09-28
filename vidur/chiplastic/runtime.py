@@ -279,15 +279,19 @@ class ChiplasticController:
                 reason = "bandwidth_assist"
 
         if reason == "steady":
+            # Only scale down if we have very low utilization for a while
             if (
-                observation.memory_pressure < thresholds.memory_utilization_scale_down
+                observation.memory_pressure < thresholds.memory_utilization_scale_down * 0.8  # More conservative
                 and self.active_memory > hardware.base_memory_dies
+                and self._cooldown == 0  # Only when not in cooldown
             ):
                 target_memory = max(hardware.base_memory_dies, self.active_memory - 1)
                 reason = "memory_scale_down"
             elif (
-                self._prefill_avg_ms < thresholds.prefill_latency_target_ms * 0.7
+                self._prefill_avg_ms < thresholds.prefill_latency_target_ms * 0.5  # More conservative
+                and self._decode_avg_ms < thresholds.decode_latency_target_ms * 0.5
                 and self.active_compute > hardware.base_compute_dies
+                and self._cooldown == 0  # Only when not in cooldown
             ):
                 target_compute = max(hardware.base_compute_dies, self.active_compute - 1)
                 reason = "compute_scale_down"
@@ -554,10 +558,16 @@ class ChiplasticRuntime:
         return added == count
 
     def _shrink_memory(self, replica_scheduler, count: int) -> bool:
-        removed = self._memory_manager.remove_helper_dies(count)
+        # Check if we can actually remove the requested dies
+        removable_count = self._memory_manager.get_removable_helper_dies_count()
+        if removable_count == 0:
+            return False  # Cannot shrink, all dies have allocated blocks
+
+        actual_count = min(count, removable_count)
+        removed = self._memory_manager.remove_helper_dies(actual_count)
         if removed:
             replica_scheduler._config.num_blocks = self._memory_manager.total_blocks
-        return removed == count
+        return removed == actual_count
 
     def _adjust_execution_time(
         self,

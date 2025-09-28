@@ -147,6 +147,17 @@ exposing remote KV fetch latency, bandwidth utilisation, and per-stage energy
 in the exported traces so you can generate the latency/energy breakdown plots
 described in the Chiplastic paper.
 
+Once you generate baseline and chiplastic runs, compare cumulative energy with:
+
+```sh
+python tools/analyze_power.py \
+  simulator_output/baseline/<RUN> \
+  simulator_output/chiplastic/<RUN>
+```
+
+This reads the `config.json` + energy summary written by the simulator and
+reports total energy and average power for each configuration.
+
 ## Simulator Output
 
 * The metrics will be logged to wandb directly and a copy will be stored in the `simulator_output/<TIMESTAMP>` directory. __A description of all the logged metrics can be found [here](docs/metrics.md).__

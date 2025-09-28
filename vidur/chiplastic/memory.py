@@ -118,6 +118,12 @@ class ChipletMemoryManager:
             logger.info("Added %s helper memory dies", added)
         return added
 
+    def get_removable_helper_dies_count(self) -> int:
+        """Get count of helper dies that can be safely removed."""
+        removable = [die_id for die_id, die in self._dies.items()
+                    if die.tier == "helper" and die.free_count == die.capacity_blocks]
+        return len(removable)
+
     def remove_helper_dies(self, count: int) -> int:
         removable = [die_id for die_id, die in sorted(self._dies.items(), reverse=True) if die.tier == "helper" and die.free_count == die.capacity_blocks]
         removed = 0
@@ -126,8 +132,9 @@ class ChipletMemoryManager:
                 break
             self._remove_die(die_id)
             removed += 1
-        if removed < count:
-            logger.warning("Requested removal of %s helper dies but only %s were free", count, removed)
+        # Only log warning if we actually have removable dies but not enough
+        if removed < count and removed > 0:
+            logger.debug("Requested removal of %s helper dies but only %s were removable", count, removed)
         return removed
 
     def remote_profile(self, request_ids: Sequence[int], active_compute: int, active_memory: int) -> RemoteAccessProfile:
