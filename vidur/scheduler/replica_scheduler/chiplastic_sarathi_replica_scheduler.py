@@ -3,9 +3,12 @@ from typing import Dict, List, Optional
 from vidur.chiplastic import ChipletMemoryManager, ChiplasticTuningConfig
 from vidur.chiplastic.runtime import ChiplasticRuntime
 from vidur.entities import Batch, BatchStage, ExecutionTime
+from vidur.logger import init_logger
 from vidur.scheduler.replica_scheduler.sarathi_replica_scheduler import (
     SarathiReplicaScheduler,
 )
+
+logger = init_logger(__name__)
 
 
 class ChiplasticSarathiReplicaScheduler(SarathiReplicaScheduler):
@@ -29,6 +32,21 @@ class ChiplasticSarathiReplicaScheduler(SarathiReplicaScheduler):
             tuning=self._tuning,
             num_initial_blocks=self._config.num_blocks,
             memory_manager=self._memory_manager,
+        )
+
+        logger.info(
+            "[ChiplasticSarathi] Initialized replica %d with %d compute dies, %d memory dies, %d total blocks",
+            self._replica_id,
+            self._tuning.hardware.base_compute_dies,
+            self._tuning.hardware.base_memory_dies,
+            self._memory_manager.total_blocks
+        )
+        logger.info(
+            "[ChiplasticSarathi] Features enabled - Freq scaling: %s, Thermal: %s, NUMA: %s, Consolidation: %s",
+            self._tuning.enable_frequency_scaling,
+            self._tuning.enable_thermal_management,
+            self._tuning.enable_numa_aware_placement,
+            self._tuning.enable_memory_consolidation
         )
 
     def maybe_apply_chiplastic(

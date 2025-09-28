@@ -220,8 +220,13 @@ class ChiplasticController:
         self._update_latency_ema(observation)
         self._update_thermal_state(observation)
 
+        logger.debug("[ChiplasticController] Stage: %s, Latency: %.2fms, Memory pressure: %.2f, Temp: %.1f°C",
+                    observation.stage_type.name, observation.latency_ms,
+                    observation.memory_pressure, observation.temperature_c)
+
         if self._cooldown > 0:
             self._cooldown -= 1
+            logger.debug("[ChiplasticController] In cooldown period, remaining steps: %d", self._cooldown)
             return ScalingDecision(
                 self._infer_state(),
                 self.active_compute,
@@ -239,28 +244,41 @@ class ChiplasticController:
 
         # Consider thermal throttling
         if observation.temperature_c > thresholds.thermal_throttle_temp_c:
+            logger.info("[ChiplasticController] Thermal throttling triggered: %.1f°C > %.1f°C",
+                       observation.temperature_c, thresholds.thermal_throttle_temp_c)
             if self._tuning.enable_frequency_scaling:
                 self._adjust_frequencies_for_thermal(observation)
                 reason = "thermal_throttle"
 
         if observation.stage_type == StageType.PREFILL:
             if observation.latency_ms > thresholds.prefill_latency_target_ms:
+                logger.info("[ChiplasticController] Prefill latency high: %.2fms > %.2fms",
+                           observation.latency_ms, thresholds.prefill_latency_target_ms)
                 # Try frequency boost first if enabled
                 if self._tuning.enable_frequency_scaling and self._can_boost_frequency():
+                    logger.info("[ChiplasticController] Boosting compute frequencies")
                     self._boost_compute_frequencies()
                     predicted_improvement = 0.15
                     reason = "prefill_frequency_boost"
                 elif self.active_compute < hardware.max_compute_dies:
+                    logger.info("[ChiplasticController] Scaling up compute: %d -> %d dies",
+                               self.active_compute, self.active_compute + 1)
                     target_compute = self.active_compute + 1
                     predicted_improvement = 1.0 / self.active_compute
                     reason = "prefill_latency"
         elif observation.stage_type == StageType.DECODE:
             remote_latency = observation.remote_latency_ms
             remote_fraction = observation.remote_profile.remote_fraction
+            logger.debug("[ChiplasticController] Decode stage - Remote latency: %.2fms, Remote fraction: %.2f",
+                        remote_latency, remote_fraction)
+
             if (
                 observation.memory_pressure > thresholds.memory_utilization_scale_up
                 and self.active_memory < hardware.max_memory_dies
             ):
+                logger.info("[ChiplasticController] Memory pressure high: %.2f > %.2f, scaling memory %d -> %d",
+                           observation.memory_pressure, thresholds.memory_utilization_scale_up,
+                           self.active_memory, self.active_memory + 1)
                 target_memory = self.active_memory + 1
                 reason = "memory_pressure"
             elif (
@@ -268,6 +286,8 @@ class ChiplasticController:
                 and remote_fraction > 0.2
                 and self.active_memory < hardware.max_memory_dies
             ):
+                logger.info("[ChiplasticController] Remote access latency high: %.2fms, scaling memory %d -> %d",
+                           remote_latency, self.active_memory, self.active_memory + 1)
                 target_memory = self.active_memory + 1
                 reason = "remote_latency"
             elif (
@@ -275,6 +295,8 @@ class ChiplasticController:
                 and self.active_compute < hardware.max_compute_dies
                 and self.active_memory > self.active_compute
             ):
+                logger.info("[ChiplasticController] Decode latency high: %.2fms, adding compute for bandwidth",
+                           observation.latency_ms)
                 target_compute = self.active_compute + 1
                 reason = "bandwidth_assist"
 
@@ -296,12 +318,16 @@ class ChiplasticController:
 
                 if min_dies_needed < self.active_memory:
                     # We can consolidate
+                    logger.info("[ChiplasticController] Memory consolidation possible: %d dies -> %d dies",
+                               self.active_memory, min_dies_needed)
                     target_memory = min_dies_needed
                     reason = "memory_consolidation"
                     predicted_improvement = (self.active_memory - target_memory) * \
                                           hardware.memory_active_power_w / 1000.0  # Power savings
                 else:
                     # Try normal scale down
+                    logger.info("[ChiplasticController] Scaling down memory: %d -> %d",
+                               self.active_memory, max(hardware.base_memory_dies, self.active_memory - 1))
                     target_memory = max(hardware.base_memory_dies, self.active_memory - 1)
                     reason = "memory_scale_down"
             elif (
@@ -310,10 +336,14 @@ class ChiplasticController:
                 and self.active_compute > hardware.base_compute_dies
                 and self._cooldown == 0  # Only when not in cooldown
             ):
+                logger.info("[ChiplasticController] Low latency, scaling down compute: %d -> %d",
+                           self.active_compute, max(hardware.base_compute_dies, self.active_compute - 1))
                 target_compute = max(hardware.base_compute_dies, self.active_compute - 1)
                 reason = "compute_scale_down"
 
         if target_compute != self.active_compute or target_memory != self.active_memory:
+            logger.info("[ChiplasticController] Scaling decision: Compute %d->%d, Memory %d->%d, Reason: %s",
+                       self.active_compute, target_compute, self.active_memory, target_memory, reason)
             self.active_compute = target_compute
             self.active_memory = target_memory
             self.state = self._infer_state()
@@ -409,17 +439,23 @@ class ChiplasticController:
         for i in range(self.active_compute):
             current_freq = self._compute_frequencies[i]
             max_freq = self._tuning.hardware.boost_freq_ghz
-            self._compute_frequencies[i] = min(current_freq * 1.2, max_freq)
+            new_freq = min(current_freq * 1.2, max_freq)
+            logger.debug("[ChiplasticController] Boosting die %d frequency: %.2f -> %.2f GHz",
+                        i, current_freq, new_freq)
+            self._compute_frequencies[i] = new_freq
 
     def _adjust_frequencies_for_thermal(self, observation: StageObservation) -> None:
         """Adjust frequencies to manage thermal constraints."""
         for i in range(self.active_compute):
             if self._temperatures[i] > self._tuning.thresholds.thermal_throttle_temp_c:
+                old_freq = self._compute_frequencies[i]
                 self._compute_frequencies[i] *= 0.9
                 self._compute_frequencies[i] = max(
                     self._compute_frequencies[i],
                     self._tuning.hardware.min_freq_ghz
                 )
+                logger.info("[ChiplasticController] Thermal throttling die %d: %.2f -> %.2f GHz (Temp: %.1f°C)",
+                           i, old_freq, self._compute_frequencies[i], self._temperatures[i])
 
 
 class ChiplasticRuntime:
@@ -548,7 +584,7 @@ class ChiplasticRuntime:
 
     def _apply_scaling(
         self,
-        decision: ScalingDecision,
+        decision,  # ScalingDecision
         replica_scheduler,
         prev_compute: int,
         prev_memory: int,

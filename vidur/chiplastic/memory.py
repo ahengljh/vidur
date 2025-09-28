@@ -79,6 +79,9 @@ class ChipletMemoryManager:
         if num_blocks <= 0:
             return []
 
+        logger.debug("[ChipletMemoryManager] Allocating %d blocks for request %d (free: %d/%d)",
+                    num_blocks, request_id, self.free_blocks, self.total_blocks)
+
         chosen_blocks: List[str] = []
 
         if self._tuning.enable_numa_aware_placement:
@@ -102,6 +105,9 @@ class ChipletMemoryManager:
 
     def free(self, request_id: int) -> None:
         block_ids = self._allocations.pop(request_id, [])
+        if block_ids:
+            logger.debug("[ChipletMemoryManager] Freeing %d blocks for request %d",
+                        len(block_ids), request_id)
         for block_id in block_ids:
             die_id = self._block_home.get(block_id)
             if die_id is None:
@@ -111,11 +117,13 @@ class ChipletMemoryManager:
 
     def add_helper_dies(self, count: int) -> int:
         added = 0
+        initial_total = self.total_blocks
         for _ in range(count):
             self._add_die(tier="helper")
             added += 1
         if added:
-            logger.info("Added %s helper memory dies", added)
+            logger.info("[ChipletMemoryManager] Added %d helper memory dies, blocks: %d -> %d",
+                       added, initial_total, self.total_blocks)
         return added
 
     def get_removable_helper_dies_count(self) -> int:
@@ -131,7 +139,12 @@ class ChipletMemoryManager:
 
         # Can consolidate if total blocks fit in fewer dies
         min_dies_needed = (total_allocated + self._blocks_per_die - 1) // self._blocks_per_die
-        return active_dies > max(min_dies_needed, 1) and active_dies > self._base_memory_dies
+        can_consolidate = active_dies > max(min_dies_needed, 1) and active_dies > self._base_memory_dies
+
+        if can_consolidate:
+            logger.debug("[ChipletMemoryManager] Consolidation possible: %d active dies -> %d min needed",
+                        active_dies, min_dies_needed)
+        return can_consolidate
 
     def consolidate_memory(self) -> int:
         """Consolidate memory blocks to fewer dies and return number of dies freed."""
@@ -197,7 +210,10 @@ class ChipletMemoryManager:
                 freed_dies += 1
 
         if migrated > 0:
-            logger.info("Consolidated %d blocks, freed %d memory dies", migrated, freed_dies)
+            logger.info("[ChipletMemoryManager] Consolidated %d blocks, freed %d memory dies (Remaining: %d dies)",
+                       migrated, freed_dies, len(self._dies))
+        elif freed_dies > 0:
+            logger.info("[ChipletMemoryManager] Freed %d empty memory dies without consolidation", freed_dies)
 
         return freed_dies
 
