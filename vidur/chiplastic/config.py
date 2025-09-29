@@ -11,6 +11,14 @@ class ChiplasticScalingThresholds:
     prefill_latency_target_ms: float = 25.0
     decode_latency_target_ms: float = 6.0
     cooldown_steps: int = 4
+    prefill_latency_severe_ratio: float = field(
+        default=2.0,
+        metadata={"help": "Latency ratio to trigger aggressive compute scaling"}
+    )
+    prefill_compute_scale_factor: float = field(
+        default=0.95,
+        metadata={"help": "Efficiency factor for prefill compute scaling (0-1)"}
+    )
     thermal_throttle_temp_c: float = field(
         default=75.0,
         metadata={"help": "Temperature threshold for thermal throttling (Celsius)"}
@@ -155,6 +163,14 @@ class ChiplasticTuningConfig:
     consolidation_threshold: float = field(
         default=0.6,
         metadata={"help": "Memory utilization threshold below which to trigger consolidation"}
+    )
+    aggressive_prefill_scaling: bool = field(
+        default=True,
+        metadata={"help": "Enable aggressive compute scaling for high prefill latency"}
+    )
+    prefill_parallel_efficiency: float = field(
+        default=0.85,
+        metadata={"help": "Parallel efficiency of prefill operations across compute dies (0-1)"}
     )
 
     def __post_init__(self) -> None:

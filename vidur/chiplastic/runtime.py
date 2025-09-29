@@ -252,19 +252,47 @@ class ChiplasticController:
 
         if observation.stage_type == StageType.PREFILL:
             if observation.latency_ms > thresholds.prefill_latency_target_ms:
-                logger.info("[ChiplasticController] Prefill latency high: %.2fms > %.2fms",
-                           observation.latency_ms, thresholds.prefill_latency_target_ms)
-                # Try frequency boost first if enabled
-                if self._tuning.enable_frequency_scaling and self._can_boost_frequency():
-                    logger.info("[ChiplasticController] Boosting compute frequencies")
+                latency_ratio = observation.latency_ms / thresholds.prefill_latency_target_ms
+                logger.info("[ChiplasticController] Prefill latency high: %.2fms > %.2fms (%.1fx target)",
+                           observation.latency_ms, thresholds.prefill_latency_target_ms, latency_ratio)
+
+                # Aggressive scaling for severe latency if enabled
+                if (
+                    self._tuning.aggressive_prefill_scaling
+                    and latency_ratio > thresholds.prefill_latency_severe_ratio
+                    and self.active_compute < hardware.max_compute_dies
+                ):
+                    # Calculate optimal compute dies based on latency ratio
+                    # Account for parallel efficiency
+                    efficiency = self._tuning.prefill_parallel_efficiency
+                    needed_speedup = latency_ratio
+                    current_power = self.active_compute
+                    # Solve: latency_ratio = current_power / (new_power * efficiency)
+                    # new_power = current_power / (latency_ratio / efficiency)
+                    ideal_power = current_power * needed_speedup / efficiency
+                    ideal_dies = min(int(ideal_power), hardware.max_compute_dies)
+                    dies_to_add = min(ideal_dies - self.active_compute, 2)  # Add up to 2 at once
+
+                    if dies_to_add > 0:
+                        logger.info("[ChiplasticController] SEVERE prefill latency - adding %d compute dies: %d -> %d",
+                                   dies_to_add, self.active_compute, self.active_compute + dies_to_add)
+                        target_compute = self.active_compute + dies_to_add
+                        # Estimate speedup with parallel efficiency
+                        predicted_improvement = (dies_to_add * efficiency) / self.active_compute
+                        reason = "prefill_latency_severe"
+                # Try frequency boost for moderate latency
+                elif self._tuning.enable_frequency_scaling and self._can_boost_frequency():
+                    logger.info("[ChiplasticController] Boosting compute frequencies for prefill")
                     self._boost_compute_frequencies()
                     predicted_improvement = 0.15
                     reason = "prefill_frequency_boost"
+                # Standard compute scaling
                 elif self.active_compute < hardware.max_compute_dies:
                     logger.info("[ChiplasticController] Scaling up compute: %d -> %d dies",
                                self.active_compute, self.active_compute + 1)
                     target_compute = self.active_compute + 1
-                    predicted_improvement = 1.0 / self.active_compute
+                    # Account for parallel efficiency
+                    predicted_improvement = self._tuning.prefill_parallel_efficiency / self.active_compute
                     reason = "prefill_latency"
         elif observation.stage_type == StageType.DECODE:
             remote_latency = observation.remote_latency_ms
@@ -661,11 +689,25 @@ class ChiplasticRuntime:
         memory_scale = _clamp(memory_scale, 0.35, 3.0)
 
         if stage_type == StageType.PREFILL:
+            # Prefill is compute-bound and scales efficiently with more compute
+            # Use configured parallel efficiency factor
+            parallel_efficiency = self._tuning.prefill_parallel_efficiency
+            effective_compute_scale = compute_scale * parallel_efficiency
+
+            logger.debug("[ChiplasticRuntime] Prefill scaling - Base scale: %.2fx, Parallel efficiency: %.2f, Effective: %.2fx, Active dies: %d",
+                        compute_scale, parallel_efficiency, effective_compute_scale, self.active_compute)
+
+            # Apply the scaling
             adjusted = _scale_execution_time(
                 observation.execution_time,
-                compute_scale=compute_scale,
+                compute_scale=effective_compute_scale,
                 memory_scale=1.0,
             )
+
+            # Log expected speedup
+            if self.active_compute > self._tuning.hardware.base_compute_dies:
+                speedup = self._tuning.hardware.base_compute_dies / (self.active_compute * parallel_efficiency)
+                logger.debug("[ChiplasticRuntime] Prefill speedup from compute scaling: %.2fx", 1.0/speedup)
         elif stage_type == StageType.DECODE:
             adjusted = _scale_execution_time(
                 observation.execution_time,
