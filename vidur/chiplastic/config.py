@@ -12,7 +12,7 @@ class ChiplasticScalingThresholds:
     decode_latency_target_ms: float = 6.0
     cooldown_steps: int = 4
     prefill_latency_severe_ratio: float = field(
-        default=2.0,
+        default=1.8,
         metadata={"help": "Latency ratio to trigger aggressive compute scaling"}
     )
     prefill_compute_scale_factor: float = field(

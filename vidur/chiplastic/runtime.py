@@ -256,44 +256,52 @@ class ChiplasticController:
                 logger.info("[ChiplasticController] Prefill latency high: %.2fms > %.2fms (%.1fx target)",
                            observation.latency_ms, thresholds.prefill_latency_target_ms, latency_ratio)
 
-                # Aggressive scaling for severe latency if enabled
+                # Check if we should add compute dies based on severity
+                should_add_compute = False
+                dies_to_add = 0
+
+                # Severe latency (>=2x) - aggressive scaling
                 if (
                     self._tuning.aggressive_prefill_scaling
-                    and latency_ratio > thresholds.prefill_latency_severe_ratio
+                    and latency_ratio >= thresholds.prefill_latency_severe_ratio
                     and self.active_compute < hardware.max_compute_dies
                 ):
-                    # Calculate optimal compute dies based on latency ratio
-                    # Account for parallel efficiency
+                    # Calculate optimal compute dies
                     efficiency = self._tuning.prefill_parallel_efficiency
                     needed_speedup = latency_ratio
                     current_power = self.active_compute
-                    # Solve: latency_ratio = current_power / (new_power * efficiency)
-                    # new_power = current_power / (latency_ratio / efficiency)
                     ideal_power = current_power * needed_speedup / efficiency
-                    ideal_dies = min(int(ideal_power), hardware.max_compute_dies)
+                    ideal_dies = min(int(ideal_power) + 1, hardware.max_compute_dies)
                     dies_to_add = min(ideal_dies - self.active_compute, 2)  # Add up to 2 at once
 
                     if dies_to_add > 0:
-                        logger.info("[ChiplasticController] SEVERE prefill latency - adding %d compute dies: %d -> %d",
-                                   dies_to_add, self.active_compute, self.active_compute + dies_to_add)
+                        should_add_compute = True
+                        logger.info("[ChiplasticController] SEVERE prefill latency (%.1fx) - adding %d compute dies: %d -> %d",
+                                   latency_ratio, dies_to_add, self.active_compute, self.active_compute + dies_to_add)
                         target_compute = self.active_compute + dies_to_add
-                        # Estimate speedup with parallel efficiency
                         predicted_improvement = (dies_to_add * efficiency) / self.active_compute
                         reason = "prefill_latency_severe"
-                # Try frequency boost for moderate latency
-                elif self._tuning.enable_frequency_scaling and self._can_boost_frequency():
-                    logger.info("[ChiplasticController] Boosting compute frequencies for prefill")
+
+                # If not severe, try frequency boost first (but only if it's actually possible)
+                if not should_add_compute and self._tuning.enable_frequency_scaling and self._can_boost_frequency():
+                    current_max_freq = max(self._compute_frequencies.get(i, self._tuning.hardware.base_freq_ghz)
+                                          for i in range(self.active_compute))
+                    logger.info("[ChiplasticController] Boosting frequencies (current max: %.2f GHz)",
+                               current_max_freq)
                     self._boost_compute_frequencies()
                     predicted_improvement = 0.15
                     reason = "prefill_frequency_boost"
-                # Standard compute scaling
-                elif self.active_compute < hardware.max_compute_dies:
-                    logger.info("[ChiplasticController] Scaling up compute: %d -> %d dies",
+
+                # If frequency boost not possible or not enough, add compute die
+                elif not should_add_compute and self.active_compute < hardware.max_compute_dies:
+                    logger.info("[ChiplasticController] Frequency boost exhausted, adding compute die: %d -> %d",
                                self.active_compute, self.active_compute + 1)
                     target_compute = self.active_compute + 1
-                    # Account for parallel efficiency
                     predicted_improvement = self._tuning.prefill_parallel_efficiency / self.active_compute
                     reason = "prefill_latency"
+                elif not should_add_compute:
+                    logger.warning("[ChiplasticController] Cannot scale further - Max compute: %d, Max freq reached",
+                                  self.active_compute)
         elif observation.stage_type == StageType.DECODE:
             remote_latency = observation.remote_latency_ms
             remote_fraction = observation.remote_profile.remote_fraction
@@ -459,18 +467,39 @@ class ChiplasticController:
 
     def _can_boost_frequency(self) -> bool:
         """Check if frequency boost is possible."""
+        # Check thermal headroom
         max_temp = max(self._temperatures[i] for i in range(self.active_compute))
-        return max_temp < self._tuning.thresholds.thermal_throttle_temp_c
+        if max_temp >= self._tuning.thresholds.thermal_throttle_temp_c:
+            return False
+
+        # Check if any die can still be boosted
+        for i in range(self.active_compute):
+            current_freq = self._compute_frequencies.get(i, self._tuning.hardware.base_freq_ghz)
+            if current_freq < self._tuning.hardware.boost_freq_ghz * 0.95:  # Allow 5% margin
+                return True
+
+        return False
 
     def _boost_compute_frequencies(self) -> None:
         """Boost compute frequencies for active dies."""
+        boosted_any = False
         for i in range(self.active_compute):
             current_freq = self._compute_frequencies[i]
             max_freq = self._tuning.hardware.boost_freq_ghz
-            new_freq = min(current_freq * 1.2, max_freq)
-            logger.debug("[ChiplasticController] Boosting die %d frequency: %.2f -> %.2f GHz",
-                        i, current_freq, new_freq)
-            self._compute_frequencies[i] = new_freq
+
+            # Only boost if there's headroom
+            if current_freq < max_freq * 0.95:  # 5% margin
+                new_freq = min(current_freq * 1.2, max_freq)
+                logger.debug("[ChiplasticController] Boosting die %d frequency: %.2f -> %.2f GHz",
+                            i, current_freq, new_freq)
+                self._compute_frequencies[i] = new_freq
+                boosted_any = True
+            else:
+                logger.debug("[ChiplasticController] Die %d already at max frequency: %.2f GHz",
+                            i, current_freq)
+
+        if not boosted_any:
+            logger.info("[ChiplasticController] All dies already at maximum frequency")
 
     def _adjust_frequencies_for_thermal(self, observation: StageObservation) -> None:
         """Adjust frequencies to manage thermal constraints."""
